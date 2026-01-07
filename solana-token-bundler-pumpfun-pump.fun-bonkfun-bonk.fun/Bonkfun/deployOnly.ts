@@ -1,0 +1,46 @@
+import { Keypair, Connection } from "@solana/web3.js"
+import base58 from "bs58"
+import { PRIVATE_KEY, RPC_ENDPOINT, RPC_WEBSOCKET_ENDPOINT, VANITY_MODE } from "./constants"
+import { generateVanityAddress, saveDataToFile } from "./utils"
+import { createBonkTokenTx } from "./src/main"
+
+const commitment = "confirmed"
+
+const connection = new Connection(RPC_ENDPOINT, {
+  wsEndpoint: RPC_WEBSOCKET_ENDPOINT, commitment
+})
+
+const mainKp = Keypair.fromSecretKey(base58.decode(PRIVATE_KEY))
+
+let mintKp = Keypair.generate()
+if (VANITY_MODE) {
+  const { keypair, pubkey } = generateVanityAddress("bonk")
+  mintKp = keypair
+  console.log(`Keypair generated with "bonk" ending: ${pubkey}`)
+}
+
+const mintAddress = mintKp.publicKey
+
+const main = async () => {
+  console.log("Mint address of token", mintAddress.toBase58())
+  saveDataToFile([base58.encode(mintKp.secretKey)], "mint.json")
+
+  const tokenCreationTx = await createBonkTokenTx(connection, mainKp, mintKp)
+  if (!tokenCreationTx || tokenCreationTx.serialize().length === 0) {
+    console.log("Token creation transaction failed")
+    return
+  }
+
+  const sig = await connection.sendRawTransaction(tokenCreationTx.serialize(), {
+    skipPreflight: true,
+    maxRetries: 3,
+  })
+  console.log(`Deploy-only tx sent: https://solscan.io/tx/${sig}`)
+
+  const confirmation = await connection.confirmTransaction(sig, "confirmed")
+  if (confirmation.value.err) {
+    console.log("Transaction failed")
+  }
+}
+
+main()
