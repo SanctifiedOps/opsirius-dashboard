@@ -337,9 +337,23 @@
           <div class="card-header">
             <div>
               <h2>Wallets</h2>
-              <p>Bundler wallets generated for this platform.</p>
+              <p>Bundler wallets for this platform (generated or imported).</p>
             </div>
             <div class="tag" id="wallet-tag">0 wallets</div>
+          </div>
+          <div class="wallets-add">
+            <label>
+              Add wallet private keys (base58, one per line)
+              <textarea id="wallets-private-keys" rows="4" placeholder="Paste up to 5 keys"></textarea>
+            </label>
+            <div class="wallets-add-actions">
+              <label class="inline">
+                <input id="wallets-replace" type="checkbox" />
+                Replace existing wallet list
+              </label>
+              <button class="action" id="wallets-add-btn">Add wallets</button>
+            </div>
+            <div class="trade-result" id="wallets-add-status">No wallet changes.</div>
           </div>
           <div class="wallets-table" id="wallets-table">
             <div class="wallet-row header">
@@ -347,6 +361,7 @@
               <div>Public key</div>
               <div>SOL</div>
               <div>Copy</div>
+              <div>Delete</div>
             </div>
           </div>
         </section>
@@ -357,7 +372,10 @@
               <h2>Jobs and Logs</h2>
               <p>Track every action executed through the dashboard.</p>
             </div>
-            <button class="ghost" id="jobs-refresh">Refresh jobs</button>
+            <div class="card-header-actions">
+              <button class="ghost" id="jobs-toggle">View all jobs</button>
+              <button class="ghost" id="jobs-refresh">Refresh jobs</button>
+            </div>
           </div>
           <div class="jobs-grid">
             <div class="jobs-list" id="jobs-list"></div>

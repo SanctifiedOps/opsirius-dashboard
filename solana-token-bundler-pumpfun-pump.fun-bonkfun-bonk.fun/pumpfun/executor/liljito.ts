@@ -1,46 +1,47 @@
 import axios from "axios";
 import { VersionedTransaction } from "@solana/web3.js";
-import base58 from 'bs58';
+import base58 from "bs58";
 
 import { LIL_JIT_ENDPOINT } from "../constants";
-let bundleId: string
 
-export const sendBundle = async (txs: VersionedTransaction[]): Promise<string | undefined> => {
+export const sendBundle = async (
+    txs: VersionedTransaction[]
+): Promise<string | undefined> => {
+    if (!LIL_JIT_ENDPOINT) {
+        console.log("Lil Jito endpoint not configured.");
+        return;
+    }
     try {
-        const serializedTxs = txs.map(tx => base58.encode(tx.serialize()))
-        const config = {
-            headers: {
-                "Content-Type": "application/json",
+        const serializedTxs = txs.map((tx) => base58.encode(tx.serialize()));
+        const response = await axios.post(
+            LIL_JIT_ENDPOINT,
+            {
+                jsonrpc: "2.0",
+                id: 1,
+                method: "sendBundle",
+                params: [serializedTxs],
             },
-        };
-        const data = {
-            jsonrpc: "2.0",
-            id: 1,
-            method: "sendBundle",
-            params: [serializedTxs],
-        };
-        axios
-            .post(
-                LIL_JIT_ENDPOINT,
-                data,
-                config
-            )
-            .then(function (response) {
-                // handle success
-                bundleId = response.data.result
-                console.log("Bundle sent successfully", bundleId)
-                return bundleId
-            })
-            .catch((err) => {
-                console.log("Error when sending the bundle");
-                return bundleId
-            }).finally(() => {
-                return bundleId
-            })
-        return bundleId
-    } catch (error) {
-        console.log("Error while sending bundle")
-        return
+            {
+                headers: {
+                    "Content-Type": "application/json",
+                },
+            }
+        );
+        const bundleId = response?.data?.result;
+        if (bundleId) {
+            console.log("Bundle sent successfully", bundleId);
+            return bundleId;
+        }
+        console.log("Bundle response missing id");
+        return;
+    } catch (error: any) {
+        const status = error?.response?.status;
+        const data = error?.response?.data;
+        console.log(`Error when sending the bundle: ${status || "no_status"}`);
+        if (data) {
+            console.log(`Lil Jito response: ${JSON.stringify(data)}`);
+        }
+        return;
     }
 }
 

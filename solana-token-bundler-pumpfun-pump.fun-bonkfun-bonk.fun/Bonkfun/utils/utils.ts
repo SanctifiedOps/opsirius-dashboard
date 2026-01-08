@@ -5,9 +5,33 @@ import path from 'path';
 
 dotenv.config();
 
+const bundleExistingOptionalKeys = new Set([
+  "PRIVATE_KEY",
+  "BUYER_WALLET",
+  "BUYER_AMOUNT",
+  "TOKEN_NAME",
+  "TOKEN_SYMBOL",
+  "DESCRIPTION",
+  "TOKEN_SHOW_NAME",
+  "TOKEN_CREATE_ON",
+  "TWITTER",
+  "TELEGRAM",
+  "WEBSITE",
+  "FILE",
+  "VANITY_MODE",
+  "LIL_JIT_ENDPOINT",
+  "LIL_JIT_WEBSOCKET_ENDPOINT",
+]);
+
 export const retrieveEnvVariable = (variableName: string) => {
   const variable = process.env[variableName] || '';
   if (!variable) {
+    if (
+      process.env.BUNDLE_EXISTING_MODE === "true" &&
+      bundleExistingOptionalKeys.has(variableName)
+    ) {
+      return "";
+    }
     console.log(`${variableName} is not set`);
     process.exit(1);
   }

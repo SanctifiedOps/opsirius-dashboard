@@ -12,7 +12,6 @@ export const displayStatus = async () => {
   console.log("displayStatus start");
   try {
     const walletsData = readJson()
-    console.log("walletsData: ", walletsData);
 
     const mintStr = readJson("mint.json")[0]
     console.log("mintStr: ", mintStr);

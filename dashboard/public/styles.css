@@ -216,6 +216,13 @@ body {
   margin-bottom: 18px;
 }
 
+.card-header-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .card-header h2 {
   font-family: var(--font-title);
   margin: 0 0 6px;
@@ -436,9 +443,27 @@ textarea {
   gap: 8px;
 }
 
+.wallets-add {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.wallets-add-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.wallets-add-actions .action {
+  min-width: 160px;
+}
+
 .wallet-row {
   display: grid;
-  grid-template-columns: 60px 1fr 120px 80px;
+  grid-template-columns: 60px 1fr 120px 80px 90px;
   gap: 12px;
   padding: 10px 12px;
   border-radius: 12px;
@@ -466,6 +491,17 @@ textarea {
 .wallet-row button:hover {
   border-color: rgba(57, 255, 138, 0.45);
   box-shadow: 0 0 12px rgba(57, 255, 138, 0.25);
+}
+
+.wallet-row button.danger {
+  border-color: rgba(255, 92, 92, 0.4);
+  background: linear-gradient(135deg, rgba(255, 92, 92, 0.15), rgba(255, 92, 92, 0.05));
+  color: #ffdada;
+}
+
+.wallet-row button.danger:hover {
+  border-color: rgba(255, 92, 92, 0.7);
+  box-shadow: 0 0 12px rgba(255, 92, 92, 0.25);
 }
 
 .tag {
@@ -594,7 +630,8 @@ textarea {
   }
 
   .wallet-row div:nth-child(3),
-  .wallet-row div:nth-child(4) {
+  .wallet-row div:nth-child(4),
+  .wallet-row div:nth-child(5) {
     grid-column: 2 / 3;
   }
 }

@@ -4,11 +4,51 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { Connection, Keypair, PublicKey, VersionedTransaction } = require("@solana/web3.js");
 const bs58 = require("bs58");
+const bs58Codec = bs58.default || bs58;
 
 const app = express();
 const PORT = process.env.PORT || 4545;
+const HOST = "127.0.0.1";
+const DASHBOARD_ENV_PATH = path.join(__dirname, ".env");
+
+function stripEnvQuotes(value) {
+  const trimmed = String(value || "").trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function readDashboardToken() {
+  try {
+    if (!fs.existsSync(DASHBOARD_ENV_PATH)) return "";
+    const raw = fs.readFileSync(DASHBOARD_ENV_PATH, "utf-8");
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq === -1) continue;
+      const key = trimmed.slice(0, eq).trim();
+      if (key !== "DASHBOARD_TOKEN") continue;
+      const value = trimmed.slice(eq + 1).trim();
+      return stripEnvQuotes(value);
+    }
+    return "";
+  } catch (error) {
+    return "";
+  }
+}
+
+const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || readDashboardToken();
 
 const ROOT = path.resolve(__dirname, "..");
+const BUNDLER_ROOT = path.join(
+  ROOT,
+  "solana-token-bundler-pumpfun-pump.fun-bonkfun-bonk.fun"
+);
 const DATA_DIR = path.join(__dirname, "data");
 const LOG_DIR = path.join(DATA_DIR, "logs");
 const JOBS_PATH = path.join(DATA_DIR, "jobs.json");
@@ -77,6 +117,16 @@ const autoSellWatchers = new Map();
 
 app.use(express.json({ limit: "6mb" }));
 app.use(express.static(path.join(__dirname, "public")));
+app.use("/api", (req, res, next) => {
+  if (!DASHBOARD_TOKEN) {
+    return res.status(500).json({ error: "Dashboard token not configured" });
+  }
+  const token = req.get("x-opsirius-token") || "";
+  if (token !== DASHBOARD_TOKEN) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+});
 
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) {
@@ -102,7 +152,11 @@ function writeJson(filePath, data) {
 function platformDir(platform) {
   const dirName = PLATFORM_DIRS[platform];
   if (!dirName) return null;
-  return path.join(ROOT, dirName);
+  const directPath = path.join(ROOT, dirName);
+  if (fs.existsSync(directPath)) return directPath;
+  const nestedPath = path.join(BUNDLER_ROOT, dirName);
+  if (fs.existsSync(nestedPath)) return nestedPath;
+  return null;
 }
 
 function envPath(platform) {
@@ -187,19 +241,36 @@ function updateEnv(platform, updates) {
   fs.writeFileSync(filePath, output);
 }
 
-function readKeys(platform, fileName) {
+function keysDir(platform) {
   const dir = platformDir(platform);
-  if (!dir) return [];
+  if (!dir) return null;
   const env = readEnv(platform);
-  const keysDir = env.KEYS_DIR || "keys";
-  const resolvedDir = path.isAbsolute(keysDir) ? keysDir : path.join(dir, keysDir);
-  const filePath = path.join(resolvedDir, fileName);
+  const resolvedDir = env.KEYS_DIR || "keys";
+  return path.isAbsolute(resolvedDir) ? resolvedDir : path.join(dir, resolvedDir);
+}
+
+function keysFilePath(platform, fileName) {
+  const dir = keysDir(platform);
+  if (!dir) return null;
+  return path.join(dir, fileName);
+}
+
+function readKeys(platform, fileName) {
+  const filePath = keysFilePath(platform, fileName);
+  if (!filePath) return [];
   return readJson(filePath, []);
+}
+
+function writeKeys(platform, fileName, keys) {
+  const filePath = keysFilePath(platform, fileName);
+  if (!filePath) throw new Error("Unknown platform");
+  ensureDir(path.dirname(filePath));
+  writeJson(filePath, keys);
 }
 
 function safeKeypair(secret) {
   try {
-    return Keypair.fromSecretKey(bs58.decode(secret));
+    return Keypair.fromSecretKey(bs58Codec.decode(secret));
   } catch (error) {
     return null;
   }
@@ -635,12 +706,30 @@ async function getMetrics(platform) {
   return data;
 }
 
-function loadJobs() {
-  return readJson(JOBS_PATH, []);
-}
-
 function saveJobs(jobs) {
   writeJson(JOBS_PATH, jobs);
+}
+
+function reconcileJobs(jobs) {
+  let changed = false;
+  const now = new Date().toISOString();
+  jobs.forEach((job) => {
+    if (job.status === "running" && !activeJobs.has(job.id)) {
+      job.status = "stale";
+      job.endedAt = job.endedAt || now;
+      job.error = job.error || "Process not running";
+      changed = true;
+    }
+  });
+  if (changed) {
+    saveJobs(jobs);
+  }
+  return jobs;
+}
+
+function loadJobs() {
+  const jobs = readJson(JOBS_PATH, []);
+  return reconcileJobs(jobs);
 }
 
 function appendLog(logPath, chunk) {
@@ -667,6 +756,14 @@ function startJob(platform, action, envOverrides = {}) {
   ensureDir(LOG_DIR);
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const logPath = path.join(LOG_DIR, `${id}.log`);
+  appendLog(
+    logPath,
+    `[${new Date().toISOString()}] Starting ${action} for ${platform}\n`
+  );
+  const overrideKeys = Object.keys(envOverrides);
+  if (overrideKeys.length) {
+    appendLog(logPath, `Overrides: ${overrideKeys.join(", ")}\n`);
+  }
   const job = {
     id,
     platform,
@@ -681,20 +778,49 @@ function startJob(platform, action, envOverrides = {}) {
   saveJobs(jobs.slice(0, 50));
 
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-  const child = spawn(npmCmd, ACTIONS[action], {
-    cwd: dir,
-    env: { ...process.env, ...envOverrides },
-  });
+  let child;
+  try {
+    child = spawn(npmCmd, ACTIONS[action], {
+      cwd: dir,
+      env: { ...process.env, ...envOverrides },
+      shell: process.platform === "win32",
+    });
+  } catch (error) {
+    appendLog(logPath, `Spawn error: ${error.message}\n`);
+    const updatedJobs = loadJobs();
+    const match = updatedJobs.find((item) => item.id === id);
+    if (match) {
+      match.status = "failed";
+      match.endedAt = new Date().toISOString();
+      match.error = error.message;
+    }
+    saveJobs(updatedJobs);
+    throw error;
+  }
   activeJobs.set(id, child);
+  appendLog(logPath, `Spawned PID: ${child.pid}\n`);
 
   child.stdout.on("data", (data) => appendLog(logPath, data.toString()));
   child.stderr.on("data", (data) => appendLog(logPath, data.toString()));
-  child.on("close", (code, signal) => {
+  child.on("error", (error) => {
+    appendLog(logPath, `Spawn error: ${error.message}\n`);
     activeJobs.delete(id);
     const updatedJobs = loadJobs();
     const match = updatedJobs.find((item) => item.id === id);
     if (match) {
-      match.status = "finished";
+      match.status = "failed";
+      match.endedAt = new Date().toISOString();
+      match.error = error.message;
+    }
+    saveJobs(updatedJobs);
+  });
+  child.on("close", (code, signal) => {
+    appendLog(logPath, `Exited with code ${code ?? "null"} signal ${signal ?? "null"}\n`);
+    activeJobs.delete(id);
+    const updatedJobs = loadJobs();
+    const match = updatedJobs.find((item) => item.id === id);
+    if (match) {
+      match.status = code === 0 ? "finished" : "failed";
       match.endedAt = new Date().toISOString();
       match.exitCode = code;
       match.signal = signal;
@@ -800,6 +926,111 @@ app.get("/api/wallets", (req, res) => {
   });
 });
 
+app.post("/api/wallets", (req, res) => {
+  const platform = req.body?.platform;
+  const keys = req.body?.keys;
+  const replace = Boolean(req.body?.replace);
+
+  if (!platformDir(platform)) {
+    return res.status(400).json({ error: "Invalid platform" });
+  }
+  if (!Array.isArray(keys)) {
+    return res.status(400).json({ error: "Keys must be an array" });
+  }
+
+  const trimmedKeys = keys
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  if (!trimmedKeys.length) {
+    return res.status(400).json({ error: "No keys provided" });
+  }
+  if (trimmedKeys.length > 50) {
+    return res.status(400).json({ error: "Too many keys" });
+  }
+
+  const existing = replace ? [] : readKeys(platform, "data.json");
+  const existingList = Array.isArray(existing) ? existing.filter((item) => typeof item === "string") : [];
+  const existingMap = new Map();
+  existingList.forEach((secret) => {
+    const kp = safeKeypair(secret);
+    if (kp) {
+      existingMap.set(kp.publicKey.toBase58(), secret);
+    }
+  });
+
+  let added = 0;
+  let skipped = 0;
+  let invalid = 0;
+  const seen = new Set();
+  const normalizedNew = [];
+
+  for (const secret of trimmedKeys) {
+    const kp = safeKeypair(secret);
+    if (!kp) {
+      invalid += 1;
+      continue;
+    }
+    const pubkey = kp.publicKey.toBase58();
+    if (existingMap.has(pubkey) || seen.has(pubkey)) {
+      skipped += 1;
+      continue;
+    }
+    const normalizedSecret = bs58Codec.encode(kp.secretKey);
+    normalizedNew.push(normalizedSecret);
+    seen.add(pubkey);
+    added += 1;
+  }
+
+  const finalKeys = replace ? normalizedNew : existingList.concat(normalizedNew);
+  writeKeys(platform, "data.json", finalKeys);
+
+  res.json({
+    ok: true,
+    total: trimmedKeys.length,
+    added,
+    skipped,
+    invalid,
+    walletCount: finalKeys.length,
+  });
+});
+
+app.delete("/api/wallets", (req, res) => {
+  const platform = req.body?.platform;
+  const publicKey = String(req.body?.publicKey || "").trim();
+
+  if (!platformDir(platform)) {
+    return res.status(400).json({ error: "Invalid platform" });
+  }
+  if (!publicKey) {
+    return res.status(400).json({ error: "Public key is required" });
+  }
+
+  const existing = readKeys(platform, "data.json");
+  const existingList = Array.isArray(existing)
+    ? existing.filter((item) => typeof item === "string")
+    : [];
+
+  let removed = 0;
+  const remaining = [];
+
+  existingList.forEach((secret) => {
+    const kp = safeKeypair(secret);
+    if (kp && kp.publicKey.toBase58() === publicKey) {
+      removed += 1;
+      return;
+    }
+    remaining.push(secret);
+  });
+
+  if (!removed) {
+    return res.status(404).json({ error: "Wallet not found" });
+  }
+
+  writeKeys(platform, "data.json", remaining);
+  res.json({ ok: true, removed, walletCount: remaining.length });
+});
+
 app.get("/api/metrics", async (req, res) => {
   const platform = req.query.platform;
   if (!platformDir(platform)) {
@@ -886,6 +1117,7 @@ app.post("/api/bundle-existing", (req, res) => {
     BUNDLE_TOTAL_SOL: String(totalSol),
     SKIP_DISTRIBUTION: "true",
     REUSE_WALLETS: "true",
+    BUNDLE_EXISTING_MODE: "true",
   };
 
   if (Number.isFinite(walletCount) && walletCount > 0) {
@@ -1054,6 +1286,6 @@ app.post("/api/jobs/:id/stop", (req, res) => {
 ensureDir(DATA_DIR);
 ensureDir(LOG_DIR);
 
-app.listen(PORT, () => {
-  console.log(`Dashboard running on http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`Dashboard running on http://${HOST}:${PORT}`);
 });

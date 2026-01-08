@@ -22,11 +22,16 @@ const statusDot = document.getElementById("status-dot");
 const statusText = document.getElementById("status-text");
 const walletsTable = document.getElementById("wallets-table");
 const walletTag = document.getElementById("wallet-tag");
+const walletKeysInput = document.getElementById("wallets-private-keys");
+const walletsAddBtn = document.getElementById("wallets-add-btn");
+const walletsReplaceInput = document.getElementById("wallets-replace");
+const walletsAddStatus = document.getElementById("wallets-add-status");
 const configForm = document.getElementById("config-form");
 const saveConfigBtn = document.getElementById("save-config");
 const refreshBtn = document.getElementById("refresh-btn");
 const baselineBtn = document.getElementById("baseline-btn");
 const jobsRefreshBtn = document.getElementById("jobs-refresh");
+const jobsToggleBtn = document.getElementById("jobs-toggle");
 const jobsList = document.getElementById("jobs-list");
 const logOutput = document.getElementById("log-output");
 const logTitle = document.getElementById("log-title");
@@ -53,23 +58,35 @@ const actionButtons = document.querySelectorAll(".action[data-action]");
 const testButton = document.getElementById("action-test");
 const tradeButtons = document.querySelectorAll(".trade-btn");
 
-const configInputs = Array.from(configForm.querySelectorAll("[data-key]"));
+const configInputs = configForm ? Array.from(configForm.querySelectorAll("[data-key]")) : [];
+
+const JOBS_PREVIEW_COUNT = 4;
+let showAllJobs = false;
 
 function setStatus(text, color) {
-  statusText.textContent = text;
-  if (color) {
+  if (statusText) {
+    statusText.textContent = text;
+  }
+  if (color && statusDot) {
     statusDot.style.background = color;
   }
 }
 
+function toNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
 function formatSol(value) {
-  if (value === null || value === undefined) return "--";
-  return `${value.toFixed(4)} SOL`;
+  const num = toNumber(value);
+  if (num === null) return "--";
+  return `${num.toFixed(4)} SOL`;
 }
 
 function formatUsd(value) {
-  if (value === null || value === undefined) return "--";
-  return `$${value.toFixed(2)}`;
+  const num = toNumber(value);
+  if (num === null) return "--";
+  return `$${num.toFixed(2)}`;
 }
 
 function formatShortKey(value) {
@@ -77,8 +94,49 @@ function formatShortKey(value) {
   return `${value.slice(0, 4)}...${value.slice(-4)}`;
 }
 
-async function fetchJson(url, options) {
-  const res = await fetch(url, options);
+function parseWalletKeys(raw) {
+  if (!raw) return [];
+  return raw
+    .split(/\r?\n/)
+    .flatMap((line) => line.split(/[,\s]+/))
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function clearElement(el) {
+  while (el.firstChild) {
+    el.removeChild(el.firstChild);
+  }
+}
+
+let authToken = null;
+
+function promptForToken() {
+  const input = window.prompt("Enter dashboard token");
+  if (!input) return null;
+  const trimmed = input.trim();
+  return trimmed || null;
+}
+
+function getAuthToken() {
+  if (authToken) return authToken;
+  const token = promptForToken();
+  if (!token) return null;
+  authToken = token;
+  return authToken;
+}
+
+async function fetchJson(url, options = {}) {
+  const token = getAuthToken();
+  if (!token) {
+    throw new Error("Missing dashboard token");
+  }
+  const headers = { ...(options.headers || {}), "X-Opsirius-Token": token };
+  const res = await fetch(url, { ...options, headers });
+  if (res.status === 401) {
+    authToken = null;
+    throw new Error("Unauthorized");
+  }
   if (!res.ok) {
     throw new Error("Request failed");
   }
@@ -90,11 +148,16 @@ function setPlatform(platform) {
   platformTabs.forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.platform === platform);
   });
-  testButton.style.display = platform === "bonkfun" ? "inline-flex" : "none";
+  if (testButton) {
+    testButton.style.display = platform === "bonkfun" ? "inline-flex" : "none";
+  }
   if (tradeMintInput) tradeMintInput.value = "";
   if (tradeResult) tradeResult.textContent = "No trades yet.";
   if (bundleExistingResult) bundleExistingResult.textContent = "No bundle started.";
   if (autoSellStatus) autoSellStatus.textContent = "Auto-sell idle.";
+  if (walletKeysInput) walletKeysInput.value = "";
+  if (walletsReplaceInput) walletsReplaceInput.checked = false;
+  if (walletsAddStatus) walletsAddStatus.textContent = "No wallet changes.";
   loadAll();
 }
 
@@ -114,6 +177,7 @@ function setFormValue(el, value) {
 }
 
 async function loadConfig() {
+  if (!configInputs.length) return;
   const data = await fetchJson(`/api/config?platform=${state.platform}`);
   const env = data.env || {};
   configInputs.forEach((input) => {
@@ -127,6 +191,7 @@ async function loadConfig() {
 }
 
 async function saveConfig() {
+  if (!configInputs.length) return;
   const payload = {};
   configInputs.forEach((input) => {
     const key = input.dataset.key;
@@ -143,65 +208,192 @@ async function saveConfig() {
 
 async function loadMetrics() {
   const data = await fetchJson(`/api/metrics?platform=${state.platform}`);
-  metricsEls.mainWallet.textContent = formatShortKey(data.mainWallet?.publicKey);
-  metricsEls.mainBalance.textContent = formatSol(data.totals.mainSol);
-  metricsEls.walletCount.textContent = data.wallets.length;
-  metricsEls.walletsSol.textContent = formatSol(data.totals.walletsSol);
-  metricsEls.totalSol.textContent = formatSol(data.totals.combinedSol);
-  metricsEls.mint.textContent = formatShortKey(data.tokenStats?.mint);
-  metricsEls.tokenHoldings.textContent = data.tokenStats
-    ? `${data.tokenStats.totalTokens.toFixed(2)} tokens`
-    : "No mint yet";
-  metricsEls.tokenValue.textContent = formatUsd(data.tokenStats?.totalValueUsd);
-  metricsEls.tokenPrice.textContent = data.tokenStats?.priceUsd
-    ? `Price: $${data.tokenStats.priceUsd.toFixed(6)}`
-    : "Price unavailable";
+  const totals = data.totals || {};
+  const wallets = Array.isArray(data.wallets) ? data.wallets : [];
+  const tokenStats = data.tokenStats || null;
+  const deltaValue = toNumber(data.delta?.combinedSol);
+  const totalTokens = toNumber(tokenStats?.totalTokens);
+  const priceUsd = toNumber(tokenStats?.priceUsd);
 
-  if (tradeMintInput && data.tokenStats?.mint && !tradeMintInput.value) {
-    tradeMintInput.value = data.tokenStats.mint;
+  metricsEls.mainWallet.textContent = formatShortKey(data.mainWallet?.publicKey);
+  metricsEls.mainBalance.textContent = formatSol(totals.mainSol);
+  metricsEls.walletCount.textContent = String(wallets.length);
+  metricsEls.walletsSol.textContent = formatSol(totals.walletsSol);
+  metricsEls.totalSol.textContent = formatSol(totals.combinedSol);
+  metricsEls.mint.textContent = formatShortKey(tokenStats?.mint);
+  metricsEls.tokenHoldings.textContent = tokenStats
+    ? totalTokens === null
+      ? "Token balance unavailable"
+      : `${totalTokens.toFixed(2)} tokens`
+    : "No mint yet";
+  metricsEls.tokenValue.textContent = formatUsd(tokenStats?.totalValueUsd);
+  metricsEls.tokenPrice.textContent =
+    priceUsd === null ? "Price unavailable" : `Price: $${priceUsd.toFixed(6)}`;
+
+  if (tradeMintInput && tokenStats?.mint && !tradeMintInput.value) {
+    tradeMintInput.value = tokenStats.mint;
   }
 
-  metricsEls.pl.textContent = data.delta
-    ? `${data.delta.combinedSol.toFixed(4)} SOL`
-    : "--";
-  metricsEls.pl.classList.toggle("positive", data.delta?.combinedSol > 0);
-  metricsEls.pl.classList.toggle("negative", data.delta?.combinedSol < 0);
-  metricsEls.baseline.textContent = data.baseline
-    ? `Baseline: ${new Date(data.baseline.timestamp).toLocaleString()}`
-    : "Baseline not set";
+  metricsEls.pl.textContent = deltaValue === null ? "--" : `${deltaValue.toFixed(4)} SOL`;
+  metricsEls.pl.classList.toggle("positive", deltaValue !== null && deltaValue > 0);
+  metricsEls.pl.classList.toggle("negative", deltaValue !== null && deltaValue < 0);
+  if (data.baseline?.timestamp) {
+    const baselineDate = new Date(data.baseline.timestamp);
+    metricsEls.baseline.textContent = Number.isNaN(baselineDate.valueOf())
+      ? "Baseline not set"
+      : `Baseline: ${baselineDate.toLocaleString()}`;
+  } else {
+    metricsEls.baseline.textContent = "Baseline not set";
+  }
 
-  renderWallets(data.wallets);
+  renderWallets(wallets);
 }
 
 function renderWallets(wallets) {
-  const rows = wallets
-    .map(
-      (wallet, index) => `
-        <div class="wallet-row">
-          <div>${index + 1}</div>
-          <div>${wallet.publicKey}</div>
-          <div>${formatSol(wallet.sol)}</div>
-          <div><button data-copy="${wallet.publicKey}">Copy</button></div>
-        </div>
-      `
-    )
-    .join("");
-  walletsTable.innerHTML = `
-    <div class="wallet-row header">
-      <div>#</div>
-      <div>Public key</div>
-      <div>SOL</div>
-      <div>Copy</div>
-    </div>
-    ${rows || "<div class='wallet-row'>No wallets yet.</div>"}
-  `;
-  walletTag.textContent = `${wallets.length} wallets`;
-  walletsTable.querySelectorAll("button[data-copy]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      navigator.clipboard.writeText(btn.dataset.copy);
-      setStatus("Public key copied", "#1d7874");
-    });
+  if (!walletsTable || !walletTag) return;
+  clearElement(walletsTable);
+
+  const headerRow = document.createElement("div");
+  headerRow.className = "wallet-row header";
+  ["#", "Public key", "SOL", "Copy", "Delete"].forEach((label) => {
+    const cell = document.createElement("div");
+    cell.textContent = label;
+    headerRow.appendChild(cell);
   });
+  walletsTable.appendChild(headerRow);
+
+  if (!wallets.length) {
+    const emptyRow = document.createElement("div");
+    emptyRow.className = "wallet-row";
+    emptyRow.textContent = "No wallets yet.";
+    walletsTable.appendChild(emptyRow);
+    walletTag.textContent = "0 wallets";
+    return;
+  }
+
+  wallets.forEach((wallet, index) => {
+    const row = document.createElement("div");
+    row.className = "wallet-row";
+
+    const indexCell = document.createElement("div");
+    indexCell.textContent = String(index + 1);
+
+    const keyCell = document.createElement("div");
+    keyCell.textContent = wallet.publicKey || "--";
+
+    const solCell = document.createElement("div");
+    solCell.textContent = formatSol(wallet.sol);
+
+    const copyCell = document.createElement("div");
+    const copyButton = document.createElement("button");
+    copyButton.textContent = "Copy";
+    if (wallet.publicKey) {
+      copyButton.addEventListener("click", () => {
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(wallet.publicKey);
+          setStatus("Public key copied", "#1d7874");
+        } else {
+          setStatus("Clipboard unavailable", "#b9382f");
+        }
+      });
+    } else {
+      copyButton.disabled = true;
+    }
+    copyCell.appendChild(copyButton);
+
+    const deleteCell = document.createElement("div");
+    const deleteButton = document.createElement("button");
+    deleteButton.textContent = "Delete";
+    deleteButton.className = "danger";
+    if (wallet.publicKey) {
+      deleteButton.addEventListener("click", async () => {
+        deleteButton.disabled = true;
+        try {
+          await deleteWallet(wallet.publicKey);
+        } finally {
+          deleteButton.disabled = false;
+        }
+      });
+    } else {
+      deleteButton.disabled = true;
+    }
+    deleteCell.appendChild(deleteButton);
+
+    row.append(indexCell, keyCell, solCell, copyCell, deleteCell);
+    walletsTable.appendChild(row);
+  });
+
+  walletTag.textContent = `${wallets.length} wallets`;
+}
+
+async function deleteWallet(publicKey) {
+  if (!publicKey) return;
+  const confirmed = window.confirm(`Delete wallet ${formatShortKey(publicKey)}?`);
+  if (!confirmed) return;
+
+  setStatus("Deleting wallet...", "#f26b3a");
+  if (walletsAddStatus) walletsAddStatus.textContent = "Deleting wallet...";
+  try {
+    await fetchJson("/api/wallets", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ platform: state.platform, publicKey }),
+    });
+    if (walletsAddStatus) {
+      walletsAddStatus.textContent = `Deleted wallet ${formatShortKey(publicKey)}.`;
+    }
+    await loadMetrics();
+    setStatus("Wallet deleted", "#1d7874");
+  } catch (error) {
+    if (walletsAddStatus) walletsAddStatus.textContent = "Failed to delete wallet.";
+    setStatus("Delete failed", "#b9382f");
+  }
+}
+
+async function addWallets() {
+  if (!walletKeysInput) return;
+  const keys = parseWalletKeys(walletKeysInput.value);
+  if (!keys.length) {
+    if (walletsAddStatus) walletsAddStatus.textContent = "Paste at least one private key.";
+    return;
+  }
+  if (keys.length > 50) {
+    if (walletsAddStatus) walletsAddStatus.textContent = "Too many keys (max 50 per upload).";
+    return;
+  }
+
+  if (walletsAddStatus) walletsAddStatus.textContent = "Adding wallets...";
+  if (walletsAddBtn) walletsAddBtn.disabled = true;
+  setStatus("Adding wallets...", "#f26b3a");
+
+  try {
+    const data = await fetchJson("/api/wallets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platform: state.platform,
+        keys,
+        replace: Boolean(walletsReplaceInput?.checked),
+      }),
+    });
+    const total = Number.isFinite(data.total) ? data.total : keys.length;
+    const added = Number.isFinite(data.added) ? data.added : 0;
+    const skipped = Number.isFinite(data.skipped) ? data.skipped : 0;
+    const invalid = Number.isFinite(data.invalid) ? data.invalid : 0;
+    const walletCount = Number.isFinite(data.walletCount) ? data.walletCount : "--";
+
+    if (walletsAddStatus) {
+      walletsAddStatus.textContent = `Added ${added}/${total} (skipped ${skipped}, invalid ${invalid}). Total wallets: ${walletCount}.`;
+    }
+    walletKeysInput.value = "";
+    await loadMetrics();
+    setStatus("Wallets updated", "#1d7874");
+  } catch (error) {
+    if (walletsAddStatus) walletsAddStatus.textContent = "Failed to add wallets.";
+    setStatus("Wallet update failed", "#b9382f");
+  } finally {
+    if (walletsAddBtn) walletsAddBtn.disabled = false;
+  }
 }
 
 async function runAction(action) {
@@ -316,38 +508,93 @@ async function stopAutoSellWatch() {
 
 async function loadJobs(selectLatest = false) {
   const data = await fetchJson(`/api/jobs?platform=${state.platform}`);
-  state.jobs = data.jobs || [];
-  jobsList.innerHTML = state.jobs
-    .map((job) => {
-      const when = new Date(job.startedAt).toLocaleTimeString();
-      return `
-        <div class="job-item ${job.id === state.selectedJobId ? "active" : ""}" data-id="${job.id}">
-          <div class="job-title">${job.action}</div>
-          <div class="job-meta">${when} - ${job.status}</div>
-        </div>
-      `;
-    })
-    .join("");
+  state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
 
   if (selectLatest && state.jobs.length) {
     state.selectedJobId = state.jobs[0].id;
     await loadJobLog(state.selectedJobId);
   }
 
-  jobsList.querySelectorAll(".job-item").forEach((item) => {
+  renderJobs();
+}
+
+function renderJobs() {
+  if (!jobsList) return;
+  clearElement(jobsList);
+
+  const shouldShowAll = showAllJobs || state.jobs.length <= JOBS_PREVIEW_COUNT;
+  const visibleJobs = shouldShowAll
+    ? state.jobs
+    : state.jobs.slice(0, JOBS_PREVIEW_COUNT);
+
+  updateJobsToggle(visibleJobs.length);
+
+  if (!visibleJobs.length) {
+    const emptyItem = document.createElement("div");
+    emptyItem.className = "job-item";
+    emptyItem.textContent = "No jobs yet.";
+    jobsList.appendChild(emptyItem);
+    return;
+  }
+
+  visibleJobs.forEach((job) => {
+    const item = document.createElement("div");
+    item.className = "job-item";
+    if (job.id === state.selectedJobId) {
+      item.classList.add("active");
+    }
+    item.dataset.id = job.id;
+
+    const title = document.createElement("div");
+    title.className = "job-title";
+    title.textContent = job.action || "Unknown action";
+
+    const meta = document.createElement("div");
+    meta.className = "job-meta";
+    const startedAt = job.startedAt ? new Date(job.startedAt) : null;
+    const when =
+      startedAt && !Number.isNaN(startedAt.valueOf())
+        ? startedAt.toLocaleTimeString()
+        : "Unknown time";
+    meta.textContent = `${when} - ${job.status || "unknown"}`;
+
+    item.append(title, meta);
     item.addEventListener("click", async () => {
       state.selectedJobId = item.dataset.id;
       await loadJobLog(state.selectedJobId);
-      loadJobs();
+      renderJobs();
     });
+    jobsList.appendChild(item);
   });
+}
+
+function updateJobsToggle(visibleCount) {
+  if (!jobsToggleBtn) return;
+  const totalCount = state.jobs.length;
+  if (totalCount <= JOBS_PREVIEW_COUNT) {
+    jobsToggleBtn.style.display = "none";
+    return;
+  }
+  jobsToggleBtn.style.display = "inline-flex";
+  if (showAllJobs) {
+    jobsToggleBtn.textContent = `Show recent (${JOBS_PREVIEW_COUNT})`;
+  } else {
+    const hidden = Math.max(0, totalCount - visibleCount);
+    jobsToggleBtn.textContent = `View all jobs (${hidden} more)`;
+  }
 }
 
 async function loadJobLog(jobId) {
   const data = await fetchJson(`/api/jobs/${jobId}`);
-  logTitle.textContent = `${data.job.action} - ${data.job.status}`;
-  logOutput.textContent = data.log || "No log output.";
-  logStop.disabled = data.job.status !== "running";
+  if (logTitle) {
+    logTitle.textContent = `${data.job.action} - ${data.job.status}`;
+  }
+  if (logOutput) {
+    logOutput.textContent = data.log || "No log output.";
+  }
+  if (logStop) {
+    logStop.disabled = data.job.status !== "running";
+  }
 }
 
 async function stopJob() {
@@ -380,8 +627,12 @@ platformTabs.forEach((tab) => {
 actionButtons.forEach((btn) => {
   btn.addEventListener("click", async () => {
     setStatus(`Running ${btn.dataset.action}...`, "#f26b3a");
-    await runAction(btn.dataset.action);
-    setStatus("Ready", "#1d7874");
+    try {
+      await runAction(btn.dataset.action);
+      setStatus("Ready", "#1d7874");
+    } catch (error) {
+      setStatus("Action failed", "#b9382f");
+    }
   });
 });
 
@@ -435,6 +686,12 @@ if (autoSellStop) {
   });
 }
 
+if (walletsAddBtn) {
+  walletsAddBtn.addEventListener("click", async () => {
+    await addWallets();
+  });
+}
+
 if (logoUploadInput) {
   logoUploadInput.addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
@@ -466,25 +723,43 @@ if (logoUploadInput) {
   });
 }
 
-saveConfigBtn.addEventListener("click", async () => {
-  setStatus("Saving config...", "#f26b3a");
-  try {
-    await saveConfig();
-    setStatus("Config saved", "#1d7874");
-  } catch (error) {
-    setStatus("Failed to save config", "#b9382f");
-  }
-});
+if (saveConfigBtn) {
+  saveConfigBtn.addEventListener("click", async () => {
+    setStatus("Saving config...", "#f26b3a");
+    try {
+      await saveConfig();
+      setStatus("Config saved", "#1d7874");
+    } catch (error) {
+      setStatus("Failed to save config", "#b9382f");
+    }
+  });
+}
 
-refreshBtn.addEventListener("click", loadAll);
-jobsRefreshBtn.addEventListener("click", () => loadJobs());
-baselineBtn.addEventListener("click", recordBaseline);
-logStop.addEventListener("click", stopJob);
+if (refreshBtn) refreshBtn.addEventListener("click", loadAll);
+if (jobsRefreshBtn) jobsRefreshBtn.addEventListener("click", () => loadJobs());
+if (jobsToggleBtn) {
+  jobsToggleBtn.addEventListener("click", async () => {
+    showAllJobs = !showAllJobs;
+    if (!showAllJobs && state.jobs.length) {
+      const recentJobs = state.jobs.slice(0, JOBS_PREVIEW_COUNT);
+      const stillVisible = recentJobs.some((job) => job.id === state.selectedJobId);
+      if (!stillVisible) {
+        state.selectedJobId = recentJobs[0].id;
+        await loadJobLog(state.selectedJobId);
+      }
+    }
+    renderJobs();
+  });
+}
+if (baselineBtn) baselineBtn.addEventListener("click", recordBaseline);
+if (logStop) logStop.addEventListener("click", stopJob);
 
 setPlatform(state.platform);
 
-setInterval(() => {
-  loadMetrics();
-  loadJobs();
-  loadAutoSellStatus();
+setInterval(async () => {
+  try {
+    await Promise.all([loadMetrics(), loadJobs(), loadAutoSellStatus()]);
+  } catch (error) {
+    setStatus("Background refresh failed", "#b9382f");
+  }
 }, 20000);

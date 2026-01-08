@@ -1,6 +1,6 @@
-import { VersionedTransaction, Keypair, Connection, ComputeBudgetProgram, TransactionInstruction, TransactionMessage, PublicKey } from "@solana/web3.js"
+import { VersionedTransaction, Keypair, Connection, ComputeBudgetProgram, TransactionInstruction, TransactionMessage, PublicKey, SystemProgram } from "@solana/web3.js"
 import base58 from "bs58"
-import { LIL_JIT_MODE, PRIVATE_KEY, RPC_ENDPOINT, RPC_WEBSOCKET_ENDPOINT, SWAP_AMOUNT, TARGET_MINT, WALLET_MIN_SOL, UNDERFUNDED_MODE, WALLET_LIMIT, TARGET_CREATOR, BUNDLE_TOTAL_SOL } from "./constants"
+import { LIL_JIT_MODE, PRIVATE_KEY, RPC_ENDPOINT, RPC_WEBSOCKET_ENDPOINT, SWAP_AMOUNT, TARGET_MINT, WALLET_MIN_SOL, UNDERFUNDED_MODE, WALLET_LIMIT, TARGET_CREATOR, BUNDLE_TOTAL_SOL, JITO_FEE } from "./constants"
 import { readJson, sleep } from "./utils"
 import { addBonkAddressesToTable, createLUT, makeBonkBuyIx } from "./src/main"
 import { executeJitoTx } from "./executor/jito"
@@ -11,9 +11,17 @@ const commitment = "confirmed"
 const connection = new Connection(RPC_ENDPOINT, {
   wsEndpoint: RPC_WEBSOCKET_ENDPOINT, commitment
 })
-const mainKp = Keypair.fromSecretKey(base58.decode(PRIVATE_KEY))
-
 const MIN_LAMPORTS = 5_000
+const JITO_TIP_ACCOUNTS = [
+  "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+  "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+  "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+  "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+  "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+  "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+  "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+  "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+]
 
 const loadExistingWallets = (limit: number) => {
   const rawKeys = readJson("data.json");
@@ -52,7 +60,6 @@ const main = async () => {
   }
 
   const mintAddress = new PublicKey(TARGET_MINT)
-  const creator = TARGET_CREATOR ? new PublicKey(TARGET_CREATOR) : mainKp.publicKey
   const desiredWalletCount = WALLET_LIMIT > 0 ? WALLET_LIMIT : 0
 
   let kps = loadExistingWallets(desiredWalletCount)
@@ -60,6 +67,8 @@ const main = async () => {
     console.log("No existing wallets found. Fund wallets and try again.")
     return
   }
+  const payerKp = kps[0]
+  const creator = TARGET_CREATOR ? new PublicKey(TARGET_CREATOR) : payerKp.publicKey
 
   if (WALLET_MIN_SOL > 0) {
     const minLamports = WALLET_MIN_SOL * 10 ** 9
@@ -82,13 +91,13 @@ const main = async () => {
   }
 
   console.log("Creating LUT started")
-  const lutAddress = await createLUT(connection, mainKp)
+  const lutAddress = await createLUT(connection, payerKp)
   if (!lutAddress) {
     console.log("Lut creation failed")
     return
   }
   console.log("LUT Address:", lutAddress.toBase58())
-  await addBonkAddressesToTable(connection, lutAddress, mintAddress, kps, mainKp, creator)
+  await addBonkAddressesToTable(connection, lutAddress, mintAddress, kps, payerKp, creator)
 
   const buyIxs: TransactionInstruction[] = []
   const totalLamports = Math.floor(BUNDLE_TOTAL_SOL * 10 ** 9)
@@ -131,6 +140,15 @@ const main = async () => {
       ComputeBudgetProgram.setComputeUnitLimit({ units: 5_000_000 }),
       ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 200_000 }),
     ]
+    if (!LIL_JIT_MODE && JITO_FEE > 0 && i === 0) {
+      const tipWallet = new PublicKey(JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)])
+      console.log(`Selected Jito tip account: ${tipWallet.toBase58()}`)
+      instructions.push(SystemProgram.transfer({
+        fromPubkey: kps[i * groupSize].publicKey,
+        toPubkey: tipWallet,
+        lamports: Math.floor(JITO_FEE * 10 ** 9),
+      }))
+    }
 
     for (let j = 0; j < groupSize; j++) {
       const index = i * groupSize + j
@@ -163,7 +181,7 @@ const main = async () => {
       return
     }
   } else {
-    await executeJitoTx(transactions, mainKp, commitment)
+    await executeJitoTx(transactions, payerKp, commitment)
   }
   await sleep(10000)
 }
